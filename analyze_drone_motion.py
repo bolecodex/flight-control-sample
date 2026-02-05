@@ -88,8 +88,21 @@ def main() -> int:
 
     image_args = [Path(p).resolve() for p in sys.argv[1:] if not p.startswith("--")]
     if not image_args:
-        image_args = [script_dir / "frames" / "frame_000001.png"]
-    image_paths = image_args
+        candidate_dirs = [
+            script_dir / "cliff-video" / "frames",
+            script_dir / "frames",
+        ]
+        image_paths = []
+        for candidate in candidate_dirs:
+            if candidate.exists():
+                image_paths = sorted(candidate.glob("*.png"))
+                if image_paths:
+                    break
+        if not image_paths:
+            print("未找到可用的图片文件，请指定图片路径或确保默认帧目录存在。", file=sys.stderr)
+            return 1
+    else:
+        image_paths = image_args
     for image_path in image_paths:
         if not image_path.exists():
             print(f"未找到图片文件: {image_path}", file=sys.stderr)
@@ -236,13 +249,14 @@ def main() -> int:
         "max_output_tokens": 512,
         "temperature": 0.3,
         "thinking": {"type": "disabled"},
+        "stream": False,
     }
 
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = Request(url, data=data, headers=headers, method="POST")
     try:
         with urlopen(req, timeout=60) as resp:
-            if payload["stream"]:
+            if payload.get("stream"):
                 streamed_text = ""
                 for raw_line in resp:
                     line = raw_line.decode("utf-8").strip()
