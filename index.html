@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>无人机飞控助手</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f4f7fb;
+        --panel: #ffffff;
+        --border: #2f2f2f;
+        --shadow: rgba(0, 0, 0, 0.08);
+        --text: #1f2a37;
+        --muted: #6b7280;
+        --accent: #6aa2ff;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 24px;
+        font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+        background: radial-gradient(circle at top, #e7f1ff 0%, var(--bg) 45%, #f9fbff 100%);
+        color: var(--text);
+      }
+      .canvas {
+        max-width: 1180px;
+        margin: 0 auto;
+        padding: 20px;
+        border: 2px solid var(--border);
+        border-radius: 18px;
+        background: var(--panel);
+        box-shadow: 0 16px 30px var(--shadow);
+      }
+      .layout {
+        display: grid;
+        grid-template-columns: 2.1fr 1fr;
+        gap: 18px;
+      }
+      .left {
+        display: grid;
+        grid-template-rows: 1fr auto;
+        gap: 14px;
+      }
+      .main-frame {
+        border: 2px solid var(--border);
+        border-radius: 14px;
+        overflow: hidden;
+        background: #dbe8f7;
+        height: 360px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .main-frame img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+      .thumbs {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+      }
+      .thumb {
+        border: 2px solid var(--border);
+        border-radius: 12px;
+        overflow: hidden;
+        background: #e6eef9;
+        height: 140px;
+      }
+      .thumb img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+      .right {
+        display: grid;
+        grid-template-rows: 1fr auto;
+        gap: 16px;
+      }
+      .panel {
+        border: 2px solid var(--border);
+        border-radius: 12px;
+        padding: 14px;
+        min-height: 260px;
+        background: #f8fbff;
+        display: grid;
+        gap: 12px;
+        align-content: start;
+      }
+      .panel h3 {
+        margin: 0;
+        font-size: 16px;
+      }
+      .panel p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 14px;
+      }
+      .output-box {
+        border: 1px solid #d0d7e2;
+        border-radius: 10px;
+        padding: 10px 12px;
+        background: #ffffff;
+        min-height: 88px;
+        font-size: 14px;
+        white-space: pre-wrap;
+        overflow: auto;
+      }
+      .output-box.muted {
+        color: var(--muted);
+      }
+      .input-box {
+        border: 2px solid var(--border);
+        border-radius: 12px;
+        padding: 14px;
+        background: #ffffff;
+        min-height: 120px;
+        display: grid;
+        gap: 10px;
+      }
+      .input-box p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 14px;
+      }
+      .input-box textarea {
+        width: 100%;
+        height: 80px;
+        border: 1px solid #d0d7e2;
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 14px;
+        resize: none;
+        font-family: inherit;
+      }
+      .input-actions {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .send-btn {
+        border: 1px solid #d0d7e2;
+        background: #f5f8ff;
+        color: #2d3a57;
+        border-radius: 18px;
+        padding: 6px 14px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .result-text {
+        font-size: 14px;
+        color: var(--text);
+        white-space: pre-wrap;
+      }
+      .result-muted {
+        color: var(--muted);
+      }
+      .actions {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 12px;
+        align-items: center;
+      }
+      .buttons {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        align-items: flex-end;
+      }
+      .btn {
+        width: 92px;
+        height: 92px;
+        border-radius: 50%;
+        border: 2px solid var(--border);
+        background: #f1e9ff;
+        display: grid;
+        place-items: center;
+        font-weight: 600;
+        color: #4b3f73;
+      }
+      .btn.secondary {
+        background: #e7f0ff;
+        color: #2d3a57;
+      }
+      .hint {
+        font-size: 12px;
+        color: var(--muted);
+        text-align: right;
+      }
+      @media (max-width: 980px) {
+        .layout {
+          grid-template-columns: 1fr;
+        }
+        .buttons {
+          flex-direction: row;
+          justify-content: flex-end;
+        }
+        .btn {
+          width: 80px;
+          height: 80px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="canvas">
+      <div class="layout">
+        <section class="left">
+          <div class="main-frame">
+            <img src="cliff-video/cliff-video.gif" alt="无人机主画面" />
+          </div>
+          <div class="thumbs">
+            <div class="thumb">
+              <img src="cliff-video/cliff-video.gif" alt="无人机画面缩略图1" />
+            </div>
+            <div class="thumb">
+              <img src="cliff-video/cliff-video.gif" alt="无人机画面缩略图2" />
+            </div>
+          </div>
+        </section>
+        <section class="right">
+          <div class="panel">
+            <h3>输入指令</h3>
+            <div id="userCommand" class="output-box muted">【用户发送的控制指令】</div>
+            <h3>VLM 推理结果</h3>
+            <div id="modelResult" class="output-box muted">【VLM 生成的控制逻辑】</div>
+          </div>
+          <div class="actions">
+            <div class="input-box">
+              <p>输入文本框：</p>
+              <textarea id="textInput" placeholder="e.g. 请描述你的任务"></textarea>
+              <div class="input-actions">
+                <p id="statusText" class="result-muted">等待输入</p>
+                <button class="send-btn" id="sendBtn" type="button">发送</button>
+              </div>
+            </div>
+            <div class="buttons">
+              <div class="btn" id="voiceBtn">语音输入</div>
+              <div class="btn secondary" id="textBtn">文本输入</div>
+              <div class="hint">支持语音/文本控制</div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+    <script>
+      const textInput = document.getElementById("textInput");
+      const textBtn = document.getElementById("textBtn");
+      const sendBtn = document.getElementById("sendBtn");
+      const voiceBtn = document.getElementById("voiceBtn");
+      const statusText = document.getElementById("statusText");
+      const userCommand = document.getElementById("userCommand");
+      const modelResult = document.getElementById("modelResult");
+      let recorder = null;
+      let audioChunks = [];
+      let recordMimeType = "";
+
+      function setStatus(text, muted = true) {
+        statusText.textContent = text;
+        statusText.className = muted ? "result-muted" : "result-text";
+      }
+
+      function updatePanel(command, result) {
+        userCommand.textContent = command || "【用户发送的控制指令】";
+        userCommand.className = command ? "output-box" : "output-box muted";
+        modelResult.textContent = result || "【VLM 生成的控制逻辑】";
+        modelResult.className = result ? "output-box" : "output-box muted";
+      }
+
+      async function sendText() {
+        const text = (textInput.value || "").trim();
+        if (!text) {
+          setStatus("请输入文本指令");
+          return;
+        }
+        setStatus("文本请求中…", false);
+        updatePanel(text, "");
+        try {
+          const resp = await fetch("/api/text", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text }),
+          });
+          const data = await resp.json();
+          if (!resp.ok) {
+            setStatus(data.error || "请求失败");
+            updatePanel(text, data.detail || "");
+            return;
+          }
+          setStatus("已完成", false);
+          updatePanel(data.text, data.result);
+        } catch (err) {
+          setStatus("请求异常，请检查服务状态");
+        }
+      }
+
+      function pickMimeType() {
+        if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) {
+          return "";
+        }
+        const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/mpeg"];
+        return candidates.find((type) => MediaRecorder.isTypeSupported(type)) || "";
+      }
+
+      async function startRecording() {
+        if (!navigator.mediaDevices) {
+          setStatus("浏览器不支持录音");
+          return;
+        }
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        recordMimeType = pickMimeType();
+        recorder = recordMimeType ? new MediaRecorder(stream, { mimeType: recordMimeType }) : new MediaRecorder(stream);
+        audioChunks = [];
+        recorder.addEventListener("dataavailable", (event) => {
+          if (event.data.size > 0) {
+            audioChunks.push(event.data);
+          }
+        });
+        recorder.addEventListener("stop", () => {
+          stream.getTracks().forEach((track) => track.stop());
+        });
+        recorder.start(500);
+        voiceBtn.textContent = "结束录音";
+        setStatus("录音中…", false);
+      }
+
+      async function stopRecording() {
+        if (!recorder) {
+          return;
+        }
+        await new Promise((resolve) => {
+          const handleStop = () => {
+            recorder.removeEventListener("stop", handleStop);
+            resolve();
+          };
+          recorder.addEventListener("stop", handleStop, { once: true });
+          if (recorder.state === "recording") {
+            if (recorder.requestData) {
+              recorder.requestData();
+            }
+            recorder.stop();
+          } else {
+            resolve();
+          }
+        });
+        if (!audioChunks.length) {
+          await new Promise((resolve) => {
+            const handleData = () => {
+              recorder.removeEventListener("dataavailable", handleData);
+              resolve();
+            };
+            recorder.addEventListener("dataavailable", handleData, { once: true });
+            setTimeout(resolve, 300);
+          });
+        }
+        voiceBtn.textContent = "语音输入";
+        setStatus("语音上传中…", false);
+        const blob = new Blob(audioChunks, { type: recordMimeType || recorder.mimeType || "audio/webm" });
+        if (!blob.size) {
+          setStatus("未录到语音，请重试");
+          return;
+        }
+        const reader = new FileReader();
+        reader.onloadend = async () => {
+          const dataUrl = reader.result || "";
+          const base64 = String(dataUrl).split(",")[1] || "";
+          try {
+            const resp = await fetch("/api/voice/stream", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                audio_base64: base64,
+                mime_type: blob.type || "audio/webm",
+              }),
+            });
+            if (!resp.ok) {
+              const data = await resp.json();
+              setStatus(data.error || "请求失败");
+              updatePanel("", data.detail || "");
+              return;
+            }
+            const streamReader = resp.body.getReader();
+            const decoder = new TextDecoder("utf-8");
+            let buffer = "";
+            const handleBlock = (block) => {
+              const lines = block.split("\n");
+              let eventType = "message";
+              const dataLines = [];
+              for (const line of lines) {
+                if (line.startsWith("event:")) {
+                  eventType = line.slice(6).trim() || "message";
+                }
+                if (line.startsWith("data:")) {
+                  dataLines.push(line.slice(5).trim());
+                }
+              }
+              if (!dataLines.length) {
+                return;
+              }
+              let payload = {};
+              try {
+                payload = JSON.parse(dataLines.join("\n"));
+              } catch (err) {
+                payload = { text: dataLines.join("\n") };
+              }
+              if (eventType === "transcript") {
+                setStatus("识别中…", false);
+                updatePanel(payload.text || "", "");
+              } else if (eventType === "result") {
+                setStatus("已完成", false);
+                updatePanel(payload.text || "", payload.result || "");
+              } else if (eventType === "error") {
+                setStatus(payload.error || "识别失败");
+                updatePanel("", payload.detail || "");
+              }
+            };
+            while (true) {
+              const { value, done } = await streamReader.read();
+              if (done) {
+                break;
+              }
+              buffer += decoder.decode(value, { stream: true });
+              let index = buffer.indexOf("\n\n");
+              while (index !== -1) {
+                const block = buffer.slice(0, index);
+                buffer = buffer.slice(index + 2);
+                if (block.trim()) {
+                  handleBlock(block);
+                }
+                index = buffer.indexOf("\n\n");
+              }
+            }
+          } catch (err) {
+            setStatus("请求异常，请检查服务状态");
+          }
+        };
+        reader.readAsDataURL(blob);
+      }
+
+      textBtn.addEventListener("click", sendText);
+      sendBtn.addEventListener("click", sendText);
+      voiceBtn.addEventListener("click", async () => {
+        if (recorder && recorder.state === "recording") {
+          await stopRecording();
+        } else {
+          await startRecording();
+        }
+      });
+    </script>
+  </body>
+</html>
