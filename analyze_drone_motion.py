@@ -637,6 +637,187 @@ def convert_to_wav(input_path: Path, output_path: Path, rate: int, channels: int
     if not output_path.exists() or output_path.stat().st_size == 0:
         raise RuntimeError("音频转换失败: 输出文件为空")
 
+# 流式识别会话管理
+streaming_sessions: dict[str, dict] = {}
+
+async def run_streaming_asr(
+    session_id: str,
+    audio_chunks: List[bytes],
+    mime_type: str,
+    on_partial: Optional[Callable[[str], None]] = None,
+) -> str:
+    """流式ASR识别，接收音频片段并实时返回识别结果"""
+    app_key = os.getenv("ASR_APP_ID") or os.getenv("ASR_APP_KEY", "")
+    access_key = os.getenv("ASR_ACCESS_TOKEN") or os.getenv("ASR_ACCESS_KEY", "")
+    resource_id = os.getenv("ASR_RESOURCE_ID", "volc.seedasr.sauc.duration")
+    if not app_key or not access_key or not resource_id:
+        raise RuntimeError("未找到 ASR_APP_ID/ASR_ACCESS_TOKEN/ASR_RESOURCE_ID，请检查 .env 或环境变量。")
+
+    target_rate = int(os.getenv("ASR_SAMPLE_RATE", "16000"))
+    target_channels = int(os.getenv("ASR_CHANNELS", "1"))
+    
+    # 合并所有音频片段并转换为WAV
+    temp_input = tempfile.NamedTemporaryFile(delete=False, suffix=mimetypes.guess_extension(mime_type) or ".webm")
+    temp_input.write(b"".join(audio_chunks))
+    temp_input.close()
+    temp_input_path = Path(temp_input.name)
+    
+    temp_wav = None
+    try:
+        # 转换为WAV格式
+        temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+        temp_wav.close()
+        normalized_path = Path(temp_wav.name)
+        convert_to_wav(temp_input_path, normalized_path, target_rate, target_channels)
+        
+        # 读取并解析WAV
+        wav_bytes = read_wav_bytes(normalized_path)
+        channels, bits, rate, data_size, data_offset = parse_wav_info(wav_bytes)
+        
+        # 提取PCM数据
+        audio_data = wav_bytes[data_offset:data_offset + data_size]
+        bytes_per_sample = channels * (bits // 8)
+        if len(audio_data) % bytes_per_sample != 0:
+            audio_data = audio_data[:-(len(audio_data) % bytes_per_sample)]
+        
+        # 分段发送
+        bytes_per_sec = channels * (bits // 8) * rate
+        segment_bytes = max(bytes_per_sec * 200 // 1000, 1)
+        chunks = [audio_data[i:i + segment_bytes] for i in range(0, len(audio_data), segment_bytes)]
+        
+        ws_url = os.getenv(
+            "ASR_WS_URL",
+            "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async",
+        )
+        connect_id = str(uuid.uuid4())
+        ws_headers = {
+            "X-Api-App-Key": app_key,
+            "X-Api-Access-Key": access_key,
+            "X-Api-Resource-Id": resource_id,
+            "X-Api-Connect-Id": connect_id,
+        }
+        
+        request_payload = {
+            "user": {"uid": "flight-control-sample"},
+            "audio": {
+                "format": "pcm",
+                "codec": "raw",
+                "rate": rate,
+                "bits": bits,
+                "channel": channels,
+            },
+            "request": {
+                "model_name": "bigmodel",
+                "enable_punc": True,
+                "enable_itn": True,
+                "enable_ddc": True,
+                "show_utterances": True,
+                "enable_nonstream": False,
+            },
+        }
+        request_bytes = gzip_payload(json.dumps(request_payload, ensure_ascii=False).encode("utf-8"))
+        header = build_asr_header(message_type=0b0001, flags=0b0001, serialization=0b0001, compression=0b0001)
+        sequence = 1
+        first_packet = header + struct.pack(">i", sequence) + struct.pack(">I", len(request_bytes)) + request_bytes
+
+        transcript = ""
+        is_last_package_received = False
+        
+        async with websockets.connect(ws_url, additional_headers=ws_headers) as ws:
+            # 发送初始请求
+            await ws.send(first_packet)
+            sequence += 1
+            
+            # 接收初始响应
+            try:
+                response = await asyncio.wait_for(ws.recv(), timeout=5)
+                if isinstance(response, bytes) and len(response) >= 4:
+                    payload = parse_asr_message(response)
+                    if payload:
+                        error_message = extract_asr_error(payload)
+                        if error_message:
+                            raise RuntimeError(f"ASR错误: {error_message}")
+            except asyncio.TimeoutError:
+                pass
+            
+            # 发送音频数据
+            for i, chunk in enumerate(chunks):
+                is_last_chunk = i == len(chunks) - 1
+                flags = 0b0011 if is_last_chunk else 0b0001
+                audio_header = build_asr_header(message_type=0b0010, flags=flags, serialization=0b0000, compression=0b0001)
+                audio_payload = gzip_payload(chunk)
+                seq_value = -sequence if is_last_chunk else sequence
+                audio_packet = audio_header + struct.pack(">i", seq_value) + struct.pack(">I", len(audio_payload)) + audio_payload
+                await ws.send(audio_packet)
+                
+                if not is_last_chunk:
+                    sequence += 1
+                
+                # 尝试接收响应
+                try:
+                    response = await asyncio.wait_for(ws.recv(), timeout=0.1)
+                    if isinstance(response, bytes) and len(response) >= 4:
+                        payload = parse_asr_message(response)
+                        if payload:
+                            if len(response) >= 2:
+                                flags_check = response[1] & 0x0F
+                                if flags_check & 0x02:
+                                    is_last_package_received = True
+                            
+                            error_message = extract_asr_error(payload)
+                            if error_message:
+                                raise RuntimeError(f"ASR错误: {error_message}")
+                            
+                            text = extract_asr_text(payload)
+                            if text:
+                                transcript = text
+                                if on_partial:
+                                    on_partial(text)
+                except asyncio.TimeoutError:
+                    pass
+                except websockets.exceptions.ConnectionClosed:
+                    break
+            
+            # 等待最终响应
+            pcm_data_size = data_size
+            bytes_per_sec = channels * (bits // 8) * rate
+            deadline = time.monotonic() + max(2.0, min(12.0, pcm_data_size / bytes_per_sec + 2.0))
+            try:
+                while not is_last_package_received:
+                    timeout = max(0.5, min(2.0, deadline - time.monotonic()))
+                    if timeout <= 0:
+                        break
+                    try:
+                        response = await asyncio.wait_for(ws.recv(), timeout=timeout)
+                        if isinstance(response, bytes) and len(response) >= 4:
+                            payload = parse_asr_message(response)
+                            if payload:
+                                if len(response) >= 2:
+                                    flags_check = response[1] & 0x0F
+                                    if flags_check & 0x02:
+                                        is_last_package_received = True
+                                
+                                error_message = extract_asr_error(payload)
+                                if error_message:
+                                    raise RuntimeError(f"ASR错误: {error_message}")
+                                
+                                text = extract_asr_text(payload)
+                                if text:
+                                    transcript = text
+                                    if on_partial:
+                                        on_partial(text)
+                    except asyncio.TimeoutError:
+                        break
+            except websockets.exceptions.ConnectionClosed:
+                pass
+        
+        return transcript.strip()
+    finally:
+        # 清理临时文件
+        temp_input_path.unlink(missing_ok=True)
+        if temp_wav:
+            Path(temp_wav.name).unlink(missing_ok=True)
+
 def create_handler(base_dir: Path, base_url: str, headers: dict, model: str):
     class ControlHandler(BaseHTTPRequestHandler):
         server_version = "FlightControlServer/1.0"
@@ -833,6 +1014,163 @@ def create_handler(base_dir: Path, base_url: str, headers: dict, model: str):
                     return
                 self.send_json(HTTPStatus.OK, {"text": text_input, "result": result})
                 return
+            
+            # 流式识别端点
+            if self.path == "/api/voice/streaming/start":
+                # 创建新的流式识别会话
+                session_id = str(uuid.uuid4())
+                streaming_sessions[session_id] = {
+                    "chunks": [],
+                    "mime_type": "audio/webm",
+                    "handler": self,
+                    "start_time": time.time(),
+                }
+                
+                # 返回SSE流
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("X-Session-Id", session_id)
+                self.end_headers()
+                
+                def send_event(event: str, data: dict) -> None:
+                    message = f"event: {event}\n" + f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+                    self.wfile.write(message.encode("utf-8"))
+                    self.wfile.flush()
+                
+                send_event("started", {"session_id": session_id})
+                streaming_sessions[session_id]["send_event"] = send_event
+                return
+            
+            if self.path == "/api/voice/streaming/chunk":
+                # 接收音频片段
+                session_id = self.headers.get("X-Session-Id") or payload.get("session_id")
+                if not session_id or session_id not in streaming_sessions:
+                    self.send_json(HTTPStatus.BAD_REQUEST, {"error": "无效的会话ID"})
+                    return
+                
+                audio_b64 = payload.get("audio_base64")
+                mime_type = payload.get("mime_type", "audio/webm")
+                if not audio_b64:
+                    self.send_json(HTTPStatus.BAD_REQUEST, {"error": "未收到音频数据"})
+                    return
+                
+                base64_text = normalize_base64(str(audio_b64))
+                try:
+                    audio_bytes = base64.b64decode(base64_text)
+                except base64.binascii.Error:
+                    self.send_json(HTTPStatus.BAD_REQUEST, {"error": "音频数据无法解析"})
+                    return
+                
+                session = streaming_sessions[session_id]
+                session["chunks"].append(audio_bytes)
+                session["mime_type"] = mime_type
+                
+                # 异步处理音频片段（实时识别）
+                # 注意：BaseHTTPRequestHandler是同步的，需要在后台线程中运行异步代码
+                def run_async_process():
+                    async def process_chunk():
+                        try:
+                            def on_partial(text: str) -> None:
+                                if "send_event" in session:
+                                    session["send_event"]("transcript", {"text": text})
+                            
+                            # 使用当前所有累积的音频片段进行识别
+                            text_input = await run_streaming_asr(
+                                session_id,
+                                session["chunks"],
+                                session["mime_type"],
+                                on_partial=on_partial,
+                            )
+                            
+                            if text_input and text_input.strip():
+                                if "send_event" in session:
+                                    session["send_event"]("transcript", {"text": text_input})
+                        except Exception as e:
+                            if "send_event" in session:
+                                session["send_event"]("error", {"error": str(e)})
+                    
+                    # 在新的事件循环中运行
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(process_chunk())
+                    finally:
+                        loop.close()
+                
+                # 在后台线程中运行
+                import threading
+                thread = threading.Thread(target=run_async_process, daemon=True)
+                thread.start()
+                
+                self.send_json(HTTPStatus.OK, {"status": "received"})
+                return
+            
+            if self.path == "/api/voice/streaming/end":
+                # 结束流式识别并返回最终结果
+                session_id = self.headers.get("X-Session-Id") or payload.get("session_id")
+                if not session_id or session_id not in streaming_sessions:
+                    self.send_json(HTTPStatus.BAD_REQUEST, {"error": "无效的会话ID"})
+                    return
+                
+                session = streaming_sessions[session_id]
+                
+                def send_event(event: str, data: dict) -> None:
+                    if "send_event" in session:
+                        session["send_event"](event, data)
+                
+                def run_finalize():
+                    async def finalize_session() -> None:
+                        try:
+                            def on_partial(text: str) -> None:
+                                send_event("transcript", {"text": text})
+                            
+                            # 使用所有累积的音频片段进行最终识别
+                            text_input = await run_streaming_asr(
+                                session_id,
+                                session["chunks"],
+                                session["mime_type"],
+                                on_partial=on_partial,
+                            )
+                            
+                            if not text_input or not text_input.strip():
+                                send_event("error", {"error": "未识别到有效文本，请检查音频内容或重新录制"})
+                                return
+                            
+                            try:
+                                result = request_text_control(text_input, base_url, headers, model)
+                                send_event("result", {"text": text_input, "result": result})
+                            except HTTPError as e:
+                                error_body = e.read().decode("utf-8") if e.fp else ""
+                                send_event("error", {"error": "请求失败", "detail": error_body})
+                        except RuntimeError as exc:
+                            send_event("error", {"error": str(exc)})
+                        except Exception as exc:
+                            import traceback
+                            error_detail = traceback.format_exc()
+                            send_event("error", {"error": f"识别过程异常: {str(exc)}", "detail": error_detail})
+                        finally:
+                            # 清理会话
+                            if session_id in streaming_sessions:
+                                del streaming_sessions[session_id]
+                    
+                    # 在新的事件循环中运行
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(finalize_session())
+                    finally:
+                        loop.close()
+                
+                # 在后台线程中运行
+                import threading
+                thread = threading.Thread(target=run_finalize, daemon=True)
+                thread.start()
+                
+                self.send_json(HTTPStatus.OK, {"status": "ended"})
+                return
+            
             self.send_error(HTTPStatus.NOT_FOUND)
 
     return ControlHandler
