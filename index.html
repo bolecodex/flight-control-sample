@@ -109,9 +109,15 @@
         font-size: 14px;
         white-space: pre-wrap;
         overflow: auto;
+        word-wrap: break-word;
       }
       .output-box.muted {
         color: var(--muted);
+      }
+      /* 红色框标记的"输入指令"区域特殊样式 */
+      #userCommand {
+        border: 2px solid #ff0000 !important;
+        min-height: 100px;
       }
       .input-box {
         border: 2px solid var(--border);
@@ -267,10 +273,36 @@
       }
 
       function updatePanel(command, result) {
-        userCommand.textContent = command || "【用户发送的控制指令】";
-        userCommand.className = command ? "output-box" : "output-box muted";
-        modelResult.textContent = result || "【VLM 生成的控制逻辑】";
-        modelResult.className = result ? "output-box" : "output-box muted";
+        // 更新红色框标记的"输入指令"区域
+        if (command && command.trim()) {
+          userCommand.textContent = command;
+          userCommand.className = "output-box";
+          userCommand.style.border = "2px solid #ff0000";
+        } else {
+          userCommand.textContent = "【用户发送的控制指令】";
+          userCommand.className = "output-box muted";
+          userCommand.style.border = "2px solid #ff0000";
+        }
+        // 更新VLM推理结果区域
+        if (result && result.trim()) {
+          modelResult.textContent = result;
+          modelResult.className = "output-box";
+        } else {
+          modelResult.textContent = "【VLM 生成的控制逻辑】";
+          modelResult.className = "output-box muted";
+        }
+      }
+
+      function updateUserCommand(command) {
+        // 更新红色框标记的"输入指令"区域
+        // 红色边框通过CSS的!important规则保证始终显示
+        if (command && command.trim()) {
+          userCommand.textContent = command;
+          userCommand.className = "output-box";
+        } else {
+          userCommand.textContent = "【用户发送的控制指令】";
+          userCommand.className = "output-box muted";
+        }
       }
 
       async function sendText() {
@@ -280,7 +312,10 @@
           return;
         }
         setStatus("文本请求中…", false);
-        updatePanel(text, "");
+        // 先将文本显示在红色框标记的"输入指令"区域
+        updateUserCommand(text);
+        modelResult.textContent = "【VLM 生成的控制逻辑】";
+        modelResult.className = "output-box muted";
         try {
           const resp = await fetch("/api/text", {
             method: "POST",
@@ -290,13 +325,26 @@
           const data = await resp.json();
           if (!resp.ok) {
             setStatus(data.error || "请求失败");
-            updatePanel(text, data.detail || "");
+            // 保持文本在红色框区域，错误信息显示在VLM结果区域
+            updateUserCommand(text);
+            modelResult.textContent = data.detail || "【VLM 生成的控制逻辑】";
+            modelResult.className = "output-box muted";
             return;
           }
           setStatus("已完成", false);
-          updatePanel(data.text, data.result);
+          // 最终结果：文本在红色框区域，VLM推理结果在下方
+          updateUserCommand(data.text || text);
+          if (data.result) {
+            modelResult.textContent = data.result;
+            modelResult.className = "output-box";
+          } else {
+            modelResult.textContent = "【VLM 生成的控制逻辑】";
+            modelResult.className = "output-box muted";
+          }
         } catch (err) {
           setStatus("请求异常，请检查服务状态");
+          // 保持文本在红色框区域
+          updateUserCommand(text);
         }
       }
 
@@ -328,6 +376,11 @@
         recorder.start(500);
         voiceBtn.textContent = "结束录音";
         setStatus("录音中…", false);
+        // 清空之前的识别结果，显示在红色框标记的"输入指令"区域
+        updateUserCommand("");
+        // 清空VLM推理结果
+        modelResult.textContent = "【VLM 生成的控制逻辑】";
+        modelResult.className = "output-box muted";
       }
 
       async function stopRecording() {
@@ -388,53 +441,104 @@
             const streamReader = resp.body.getReader();
             const decoder = new TextDecoder("utf-8");
             let buffer = "";
+            
             const handleBlock = (block) => {
               const lines = block.split("\n");
               let eventType = "message";
               const dataLines = [];
+              
               for (const line of lines) {
-                if (line.startsWith("event:")) {
-                  eventType = line.slice(6).trim() || "message";
+                const trimmedLine = line.trim();
+                if (trimmedLine.startsWith("event:")) {
+                  eventType = trimmedLine.slice(6).trim() || "message";
                 }
-                if (line.startsWith("data:")) {
-                  dataLines.push(line.slice(5).trim());
+                if (trimmedLine.startsWith("data:")) {
+                  const dataContent = trimmedLine.slice(5).trim();
+                  if (dataContent) {
+                    dataLines.push(dataContent);
+                  }
                 }
               }
+              
               if (!dataLines.length) {
                 return;
               }
+              
+              // 合并所有data行
+              const dataContent = dataLines.join("\n");
               let payload = {};
+              
               try {
-                payload = JSON.parse(dataLines.join("\n"));
+                payload = JSON.parse(dataContent);
               } catch (err) {
-                payload = { text: dataLines.join("\n") };
+                // 如果不是JSON，尝试作为纯文本处理
+                payload = { text: dataContent };
               }
+              
+              // 处理不同类型的流式事件
               if (eventType === "transcript") {
+                // 实时流式识别结果 - 显示在红色框标记的"输入指令"区域
                 setStatus("识别中…", false);
-                updatePanel(payload.text || "", "");
+                const transcriptText = payload.text || "";
+                if (transcriptText) {
+                  updateUserCommand(transcriptText);
+                }
               } else if (eventType === "result") {
+                // 最终识别结果和VLM推理结果
                 setStatus("已完成", false);
-                updatePanel(payload.text || "", payload.result || "");
+                const finalText = payload.text || "";
+                // 识别文字显示在红色框标记的"输入指令"区域
+                if (finalText) {
+                  updateUserCommand(finalText);
+                }
+                // VLM推理结果显示在下方的"VLM 推理结果"区域
+                const vlmResult = payload.result || "";
+                if (vlmResult) {
+                  modelResult.textContent = vlmResult;
+                  modelResult.className = "output-box";
+                } else {
+                  modelResult.textContent = "【VLM 生成的控制逻辑】";
+                  modelResult.className = "output-box muted";
+                }
               } else if (eventType === "error") {
-                setStatus(payload.error || "识别失败");
-                updatePanel("", payload.detail || "");
+                // 错误处理
+                setStatus(payload.error || "识别失败", false);
+                // 清空红色框区域
+                updateUserCommand("");
+                // 错误信息显示在VLM结果区域
+                modelResult.textContent = payload.detail || payload.error || "【VLM 生成的控制逻辑】";
+                modelResult.className = "output-box muted";
               }
             };
-            while (true) {
-              const { value, done } = await streamReader.read();
-              if (done) {
-                break;
-              }
-              buffer += decoder.decode(value, { stream: true });
-              let index = buffer.indexOf("\n\n");
-              while (index !== -1) {
-                const block = buffer.slice(0, index);
-                buffer = buffer.slice(index + 2);
-                if (block.trim()) {
-                  handleBlock(block);
+            
+            // 流式读取和处理
+            try {
+              while (true) {
+                const { value, done } = await streamReader.read();
+                if (done) {
+                  // 处理剩余的buffer
+                  if (buffer.trim()) {
+                    handleBlock(buffer);
+                  }
+                  break;
                 }
-                index = buffer.indexOf("\n\n");
+                
+                buffer += decoder.decode(value, { stream: true });
+                
+                // 按SSE格式解析（每个事件以\n\n分隔）
+                let index = buffer.indexOf("\n\n");
+                while (index !== -1) {
+                  const block = buffer.slice(0, index);
+                  buffer = buffer.slice(index + 2);
+                  if (block.trim()) {
+                    handleBlock(block);
+                  }
+                  index = buffer.indexOf("\n\n");
+                }
               }
+            } catch (err) {
+              console.error("流式读取错误:", err);
+              setStatus("流式读取异常", false);
             }
           } catch (err) {
             setStatus("请求异常，请检查服务状态");

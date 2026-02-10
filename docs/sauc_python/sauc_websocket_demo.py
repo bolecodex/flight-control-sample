@@ -7,7 +7,28 @@ import uuid
 import logging
 import os
 import subprocess
+from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple, AsyncGenerator
+
+# 加载环境变量
+def load_env(env_path: Path) -> None:
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip())
+
+# 加载 .env 文件
+script_dir = Path(__file__).resolve().parent
+env_path = script_dir.parent.parent / ".env"
+if not env_path.exists():
+    env_path = script_dir.parent / ".env"
+load_env(env_path)
 
 # 配置日志
 logging.basicConfig(
@@ -48,10 +69,10 @@ class CompressionType:
 
 class Config:
     def __init__(self):
-        # 填入控制台获取的app id和access token
+        # 从环境变量读取配置，如果没有则使用占位符
         self.auth = {
-            "app_key": "xxxxxxx",
-            "access_key": "xxxxxxxxxxxx"
+            "app_key": os.getenv("ASR_APP_ID", "xxxxxxx"),
+            "access_key": os.getenv("ASR_ACCESS_TOKEN", "xxxxxxxxxxxx")
         }
 
     @property
@@ -182,8 +203,9 @@ class RequestBuilder:
     @staticmethod
     def new_auth_headers() -> Dict[str, str]:
         reqid = str(uuid.uuid4())
+        resource_id = os.getenv("ASR_RESOURCE_ID", "volc.bigasr.sauc.duration")
         return {
-            "X-Api-Resource-Id": "volc.bigasr.sauc.duration",
+            "X-Api-Resource-Id": resource_id,
             "X-Api-Request-Id": reqid,
             "X-Api-Access-Key": config.access_key,
             "X-Api-App-Key": config.app_key
@@ -502,7 +524,8 @@ async def main():
     #wss://openspeech.bytedance.com/api/v3/sauc/bigmodel
     #wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async
     #wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream
-    parser.add_argument("--url", type=str, default="wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream", 
+    default_url = os.getenv("ASR_WS_URL", "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream")
+    parser.add_argument("--url", type=str, default=default_url, 
                        help="WebSocket URL")
     parser.add_argument("--seg-duration", type=int, default=200, 
                        help="Audio duration(ms) per packet, default:200")
